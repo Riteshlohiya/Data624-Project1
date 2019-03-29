@@ -1,0 +1,335 @@
+---
+title: "Data624 Project1"
+author: "Ritesh Lohiya"
+date: "March 25, 2019"
+output: html_document
+---
+
+#Data624 Project 1
+
+
+```{r}
+suppressMessages(suppressWarnings(library(fpp2)))
+suppressMessages(suppressWarnings(library(readxl)))
+suppressMessages(suppressWarnings(library(seasonal)))
+suppressMessages(suppressWarnings(library(rdatamarket)))
+suppressMessages(suppressWarnings(library(tseries)))
+suppressMessages(suppressWarnings(library(tidyverse)))
+suppressMessages(suppressWarnings(library(scales)))
+#suppressMessages(suppressWarnings(library(theme_light())))
+suppressMessages(suppressWarnings(library(forecast)))
+```
+
+####This project consists of 3 parts - two required and one bonus and is worth 15% of your grade.  The project is due at 11:59 PM on Sunday March 31.  I will accept late submissions with a penalty until the meetup after that when we review some projects.
+
+##Part A - ATM Forecast, ATM624Data.xlsx
+
+####In part A, I want you to forecast how much cash is taken out of 4 different ATM machines for May 2010.  The data is given in a single file.  The variable 'Cash' is provided in hundreds of dollars, other than that it is straight forward.   I am being some what ambiguous on purpose to make this have a little more business feeling.  Explain and demonstrate your process, techniques used and not used, and your actual forecast.  I am giving you data via an excel file, please provide your written report on your findings, visuals, discussion and your R code via an RPubs link along with the actual.rmd file  Also please submit the forecast which you will put in an Excel readable file.
+
+
+```{r}
+# read the data
+df_atm <- readxl::read_excel("C:/Users/rites/Documents/GitHub/Data624-Project1/ATM624Data.xlsx")
+# data preprocessing: 
+df_atm <- df_atm %>%
+  drop_na() %>%
+  spread(ATM, Cash) %>% 
+  mutate(DATE = as.Date(DATE, origin = "1899-12-30")) # in Excel, 1 == 1/1/1900
+# convert to timeseries
+atm_ts <- ts(df_atm %>% select(-DATE))
+
+```
+
+#### Lets plot this timeseries.
+
+```{r}
+df_atm %>% gather(ATM, Cash, -DATE) %>% 
+ggplot(aes(x = DATE, y = Cash, col = ATM)) +
+geom_line(show.legend = FALSE) +
+facet_wrap(~ ATM, ncol = 1, scales = "free_y") +
+labs(title = "Cash withdrawn from ATMs", x = "Date") +
+scale_y_continuous("Cash withdrawn (hundreds)", labels = dollar)
+```
+
+#### From the plot we can see that ATM1 & ATM2 has variations between \$0-\$15,000, with few exceptions.  ATM3 shows zero withdrawals for most of the year until the final 3 days, with observations in the area of \$10,000.  ATM4 shows a similar pattern as ATM1 & ATM2, with the exception of one day showing withdrawals over \$100,000.
+
+####ATM1 & ATM2 each exhibit similar patterns through the time window and will use the entire timeseries. ATM3 was mostly inactive. ATM4 has just one spike, so cant consider in forcasting.
+
+
+#### Creating seperate time series objects.
+
+```{r}
+# ATM1 & ATM2
+
+atm1 <- atm_ts[, "ATM1"]
+atm2 <- atm_ts[, "ATM2"]
+
+#last 3 observations of ATM3 & convert to ts
+
+atm3 <- atm_ts[(nrow(atm_ts) - 2):nrow(atm_ts), "ATM3"]
+atm3 <- ts(atm3, start = 363)
+atm3 <- atm_ts[, "ATM3"]
+atm3[which(atm3 == 0)] <- NA
+
+# ATM4 & impute spike with median
+
+atm4 <- atm_ts[, "ATM4"]
+atm4[which.max(atm4)] <- median(atm4, na.rm = TRUE)
+```
+
+#### Fitting
+
+#### Lets see few data points to figure out the seasonality for ATM1, ATM2 and ATM4.
+
+```{r}
+autoplot(ts(atm_ts[1:61, ])) +
+labs(title = "Cash withdrawn from ATMs", x = "Day") +
+scale_y_continuous("Cash withdrawn (hundreds)", labels = dollar) +
+scale_color_discrete(NULL)
+```
+
+#### From the plot we can see there is little seasonality. Daily timeseries can not be decomposed to capture the seasonality identified above. So lets capture weekly seasonal behavior i.e. set frequency = 7.
+
+```{r}
+atm1 <- ts(atm1, frequency = 7)
+atm2 <- ts(atm2, frequency = 7)
+# impute NA value 
+atm1[which(is.na(atm1))] <- median(atm1, na.rm = TRUE)
+atm2[which(is.na(atm2))] <- median(atm2, na.rm = TRUE)
+
+atm4 <- ts(atm4, frequency = 7)
+```
+
+### ATM 1
+
+####The ATM 1 timeseries is displayed below with its ACF & spectrum plots:
+
+```{r}
+ggtsdisplay(atm1, points = FALSE, plot.type = "spectrum",
+main = "Withdrawals from atm1", xlab = "Week", ylab = "Cash (hundreds)")
+```
+
+####The ACF and the spectrum plots show weekly seasonality, there are large spikes in the ACF lags 7, 14, and 21 and in the spectrum plot at frequencies 1, 2, and 3.  This seasonal ARIMA model.  For autocorrelation, the time series is differenced with a lag of 7:
+
+```{r}
+ggtsdisplay(diff(atm1, 7), points = FALSE,
+main = "Dif lag7 withdrawals from atm1",
+xlab = "Week", ylab = "Cash (hundreds)")
+```
+
+####This timeseries is now stationary.  The spikes in the ACF and PACF at $k = 1$ suggest non-seasonal AR(1) and/or MA(1) components of the model.  The spikes in the ACF and PACF at $k = 7$ and the decreasing spikes at $k = 14$ and $k = 21$ suggest seasonal AR(1) and/or seasonal MA(1) components.  This suggests fifteen possible models: ARIMA(p, 0, q)(P, 1, Q) for $p, q, P, Q \in [0, 1]$ excluding the case where $p, q, P, Q = 0$
+
+####The models are calculated and their AIC values returned:
+
+```{r}
+# lambda for Box-cox transformation
+atm1_lambda <- BoxCox.lambda(atm1)
+# define function to create models & return AIC values for timeseries
+atm_aic <- function(p, d, q, P, D, Q) {
+# create model with Box-Cox and specified ARIMA parameters; extract AIC
+  AIC(Arima(atm1, order = c(p, d, q), seasonal = c(P, D, Q), lambda = atm1_lambda))
+}
+# create possible combinations of p, q, P, Q except all zero
+expand.grid(p = 0:1, q = 0:1, P = 0:1, Q = 0:1) %>%
+filter(p > 0 | q > 0 | P > 0 | Q > 0) %>% 
+# calc AIC for models
+mutate(aic = pmap_dbl(list(p, 0, q, P, 1, Q), atm_aic)) %>% 
+# return best AIC
+slice(which.min(aic))
+```
+
+
+####The minimum AIC value is for non-seasonal AR(1) & MA(1) and seasonal AR(0) & MA(1). The model used is ARIMA(1,0,1)(0,1,1):
+
+```{r}
+atm1_fit <- Arima(atm1, order = c(1, 0, 1), seasonal = c(0, 1, 1), lambda = atm1_lambda)
+```
+
+#### Ljung-Box test and diagnostic plotting:
+
+```{r}
+Box.test(resid(atm1_fit), type = "L", fitdf = 3, lag = 7)
+ggtsdisplay(resid(atm1_fit), points = FALSE, plot.type = "histogram",
+main = "Residuals for ARIMA(1,0,1)(0,1,1) fit of atm1 withdrawals",
+xlab = "Week", ylab = "Residual")
+```
+
+#### From the Ljung-Box test, p-value > 0.05, so it has white noise.  The residuals are normally distributed with a mean around zero. They do not appear to be autocorrelated. This model will be used for forecasting.
+
+#### ATM 2
+
+####Lets perform the same for ATM 2
+
+```{r}
+ggtsdisplay(atm2, points = FALSE,
+main = "Withdrawals from atm2", xlab = "Week", ylab = "Cash (hundreds)")
+```
+
+####We can wee weekly seasonality same as atm1 and it is also differenced with lag = 7:
+
+```{r}
+ggtsdisplay(diff(atm2, 7), points = FALSE,
+main = "Dif lag7 withdrawals from atm2",
+xlab = "Week", ylab = "Cash (hundreds)")
+```
+
+####We can see spikes at $k=7$ so $D = 1$, and the stationary nature of the timeseries suggests $d = 0$.  The spikes in ACF & PACF in the non-differenced series at $k = 2$ & $k = 5$ suggest $p, q \in [0, 2, 5]$.  
+
+```{r}
+#lambda for Box-cox transformation
+atm2_lambda <- BoxCox.lambda(atm2)
+# repurpose above function for atm2
+atm_aic <- function(p, d, q, P, D, Q) {
+# create model with Box-Cox and specified ARIMA parameters; extract AIC
+AIC(Arima(atm2, order = c(p, d, q), seasonal = c(P, D, Q), lambda = atm2_lambda))
+}
+# create possible combinations of p, q, P, Q except all zero
+expand.grid(p = c(0, 2, 5), q = c(0, 2, 5), P = 0:1, Q = 0:1) %>%
+filter(p > 0 | q > 0 | P > 0 | Q > 0) %>% 
+# calc AIC for models
+mutate(aic = pmap_dbl(list(p, 0, q, P, 1, Q), atm_aic)) %>% 
+# return best AIC
+slice(which.min(aic))
+```
+
+#### The minimum AIC value is for non-seasonal AR(5) & MA(5) and seasonal AR(0) & MA(1). The model used is ARIMA(5,0,5)(0,1,1):
+
+```{r}
+atm2_fit <- Arima(atm2, order = c(5, 0, 5), seasonal = c(0, 1, 1), lambda = atm2_lambda)
+```
+
+####Ljung-Box test and diagnostic plotting:
+
+```{r}
+Box.test(resid(atm2_fit), type = "L", fitdf = 11, lag = 14)
+ggtsdisplay(resid(atm2_fit), points = FALSE, plot.type = "histogram",
+main = "Residuals for ARIMA(5,0,5)(0,1,1) of atm2 withdrawals",
+xlab = "Week", ylab = "Residual")
+```
+
+#### From Ljung-Box test, p-value > 0.05, so it has white noise.  The residuals appear to be approximately normally distributed with a mean around zero. This model will be used for forecasting.
+
+
+#### ATM 3
+
+#### for ATM 3 we will use simple mean forecast as there are only 3 non NA values.
+
+#### ATM 4
+
+####We will use the same procedure for ATM 4 as ATM 1 and ATM 2
+
+
+```{r}
+ggtsdisplay(atm4, points = FALSE,
+main = "Withdrawals from atm4", xlab = "Week", ylab = "Cash (hundreds)")
+```
+
+####The same weekly seasonality is seen as for atm1 & atm2 and it is also differenced with lag = 7:
+
+```{r}
+ggtsdisplay(diff(atm4, 7), points = FALSE,
+main = "Dif lag7 withdrawals from atm4",
+xlab = "Week", ylab = "Cash (hundreds)")
+```
+
+####The stationary time series with a spike at $k=7$ so $D = 1$ and $d = 0$. spikes in the ACF & PACF of both the original and differenced timeseries as atm2 suggest $p, q \in [0, 2, 5]$ and $P, Q \in [0,1]$.  
+
+```{r}
+# lambda for Box-cox transformation
+atm4_lambda <- BoxCox.lambda(atm4)
+# repurpose above function for atm4
+atm_aic <- function(p, d, q, P, D, Q) {
+# create model with Box-Cox and specified ARIMA parameters; extract AIC
+AIC(Arima(atm4, order = c(p, d, q), seasonal = c(P, D, Q), lambda = atm4_lambda))
+}
+# create possible combinations of p, q, P, Q except all zero
+expand.grid(p = c(0, 2, 5), q = c(0, 2, 5), P = 0:1, Q = 0:1) %>%
+filter(p > 0 | q > 0 | P > 0 | Q > 0) %>% 
+# calc AIC for models
+mutate(aic = pmap_dbl(list(p, 0, q, P, 1, Q), atm_aic)) %>% 
+# return best AIC
+slice(which.min(aic))
+```
+
+
+
+####The minimum AIC value is for non-seasonal AR(0) & MA(2) and seasonal AR(0) & MA(1). The model used is ARIMA(0,0,2)(0,1,1):
+
+```{r}
+atm4_fit <- Arima(atm4, order = c(0, 0, 2), seasonal = c(0, 1, 1), lambda = atm4_lambda)
+```
+
+#### Ljung-Box test and diagnostic plotting:
+
+```{r}
+Box.test(resid(atm4_fit), type = "L", fitdf = 3, lag = 7)
+ggtsdisplay(resid(atm4_fit), points = FALSE, plot.type = "histogram",
+main = "Residuals for ARIMA(0,0,2)(0,1,1) of atm4 withdrawals",
+xlab = "Week", ylab = "Residual")
+```
+
+#### From Ljung-Box test, p-value > 0.05, with residuals approximately normally distributed with a mean around zero. This model will be used for forecasting.
+
+#### Forecasting
+
+```{r}
+atm1_forecast <- forecast(atm1_fit, 31, level = 95)
+atm2_forecast <- forecast(atm2_fit, 31, level = 95)
+atm3_forecast <- meanf(atm3, 31, level = 95)
+atm4_forecast <- forecast(atm4_fit, 31, level = 95)
+```
+ 
+#### Forecasts are plotted below:
+
+```{r}
+gridExtra::grid.arrange(
+autoplot(atm1_forecast) + 
+labs(title = "atm1: ARIMA(1,0,1)(0,1,1)", x = "Week", y = NULL) +
+theme(legend.position = "none"),
+
+autoplot(atm2_forecast) + 
+labs(title = "atm2: ARIMA(5,0,5)(0,1,1)", x = "Week", y = NULL) +
+theme(legend.position = "none"),
+
+autoplot(atm3_forecast) + 
+labs(title = "atm3: mean", x = "Day", y = NULL) +
+theme(legend.position = "none"),
+
+autoplot(atm4_forecast) + 
+labs(title = "atm4: ARIMA(0,0,2)(0,1,1)", x = "Week", y = NULL) +
+theme(legend.position = "none"),
+
+a = grid::textGrob("Forecasted atm withdrawals")
+)
+```
+
+#### There are seasonality for atms 1, 2, and 4 and a single value forecast for atm3.  
+
+#### The forecast are written to csv:
+
+```{r}
+data_frame(DATE = rep(max(df_atm$DATE) + 1:31, 4),
+atm = rep(names(df_atm)[-1], each = 31),
+Cash = c(atm1_forecast$mean, atm2_forecast$mean,
+atm3_forecast$mean, atm4_forecast$mean)) %>% 
+write_csv("C:/Users/rites/Documents/GitHub/Data624-Project1/project1_atm.csv")
+```
+
+##Part B - Forecasting Power, ResidentialCustomerForecastLoad-624.xlsx
+
+####Part B consists of a simple dataset of residential power usage for January 1998 until December 2013.  Your assignment is to model these data and a monthly forecast for 2014.  The data is given in a single file.  The variable 'KWH' is power consumption in Kilowatt hours, the rest is straight forward.    Add this to your existing files above. 
+
+```{r}
+# read the data
+pu_data <- readxl::read_excel("C:/Users/rites/Documents/GitHub/Data624-Project1/ResidentialCustomerForecastLoad-624.xlsx")
+
+#timeseries
+Pu_data_ts =ts(pu_data[,"KWH"],start = c(1998,1),frequency = 12)
+
+
+```
+
+
+
+
+

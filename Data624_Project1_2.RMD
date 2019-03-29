@@ -1,0 +1,33 @@
+---
+title: "Data624_Project1_2"
+author: "Ritesh Lohiya"
+date: "March 28, 2019"
+output: html_document
+---
+
+```{r}
+suppressMessages(suppressWarnings(library(fpp2)))
+suppressMessages(suppressWarnings(library(readxl)))
+suppressMessages(suppressWarnings(library(seasonal)))
+suppressMessages(suppressWarnings(library(rdatamarket)))
+suppressMessages(suppressWarnings(library(tseries)))
+suppressMessages(suppressWarnings(library(tidyverse)))
+suppressMessages(suppressWarnings(library(scales)))
+#suppressMessages(suppressWarnings(library(theme_light())))
+suppressMessages(suppressWarnings(library(forecast)))
+```
+
+
+##Part B - Forecasting Power, ResidentialCustomerForecastLoad-624.xlsx
+
+####Part B consists of a simple dataset of residential power usage for January 1998 until December 2013.  Your assignment is to model these data and a monthly forecast for 2014.  The data is given in a single file.  The variable 'KWH' is power consumption in Kilowatt hours, the rest is straight forward.    Add this to your existing files above. 
+
+```{r}
+# read the data
+pu_data <- readxl::read_excel("C:/Users/rites/Documents/GitHub/Data624-Project1/ResidentialCustomerForecastLoad-624.xlsx")
+
+#timeseries
+Pu_data_ts =ts(pu_data[,"KWH"],start = c(1998,1),frequency = 12)
+
+
+```
