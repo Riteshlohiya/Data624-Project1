@@ -16,12 +16,12 @@ suppressMessages(suppressWarnings(library(rdatamarket)))
 suppressMessages(suppressWarnings(library(tseries)))
 suppressMessages(suppressWarnings(library(tidyverse)))
 suppressMessages(suppressWarnings(library(scales)))
-#suppressMessages(suppressWarnings(library(theme_light())))
 suppressMessages(suppressWarnings(library(forecast)))
+suppressMessages(suppressWarnings(library(lubridate)))
 ```
 
 ####This project consists of 3 parts - two required and one bonus and is worth 15% of your grade.  The project is due at 11:59 PM on Sunday March 31.  I will accept late submissions with a penalty until the meetup after that when we review some projects.
-
+ 
 ##Part A - ATM Forecast, ATM624Data.xlsx
 
 ####In part A, I want you to forecast how much cash is taken out of 4 different ATM machines for May 2010.  The data is given in a single file.  The variable 'Cash' is provided in hundreds of dollars, other than that it is straight forward.   I am being some what ambiguous on purpose to make this have a little more business feeling.  Explain and demonstrate your process, techniques used and not used, and your actual forecast.  I am giving you data via an excel file, please provide your written report on your findings, visuals, discussion and your R code via an RPubs link along with the actual.rmd file  Also please submit the forecast which you will put in an Excel readable file.
@@ -324,10 +324,198 @@ write_csv("C:/Users/rites/Documents/GitHub/Data624-Project1/project1_atm.csv")
 pu_data <- readxl::read_excel("C:/Users/rites/Documents/GitHub/Data624-Project1/ResidentialCustomerForecastLoad-624.xlsx")
 
 #timeseries
-Pu_data_ts =ts(pu_data[,"KWH"],start = c(1998,1),frequency = 12)
-
-
+pu_data =ts(pu_data[,"KWH"],start = c(1998,1),frequency = 12)
 ```
+
+#### Data exploration
+
+```{r}
+autoplot(pu_data) +
+labs(title = "Monthly residential power usage")
+```
+
+#### We can see annual seasonality in the data.
+
+```{r}
+# Box-cox paramter
+pu_lambda <- BoxCox.lambda(pu_data)
+pu_trans <- BoxCox(pu_data, pu_lambda)
+```
+
+#### Fitting
+
+```{r}
+ggtsdisplay(diff(pu_trans, 12), points = FALSE,
+main = "Dif lag12 Box-Cox transformed residential power usage")
+```
+
+####The series is stationary, so no non-seasonal differencing is needed.  The decaying seasonal spikes in the PACF suggests a seasonal AR(1) component, while the very quickly-decaying seasonal spikes in the ACF suggest the possibility of a seasonal MA(1) component.  Spikes in the PACF and ACF at $k = 1$ and $k = 4$ suggest non-seasonal AR(1) or AR(4) components, and non-seasonal MA(1) or MA(4) components.  The function used to select the model with lowest AIC in Part A is redefined for use on the `kWh` timeseries with $D = 1$ and $d = 0$:
+
+```{r}
+# redefine function
+pu_aic <- function(p, q, P, Q) {
+# create model with Box-Cox and specified ARIMA parameters; extract AIC
+AIC(Arima(pu_data, order = c(p, 0, q), seasonal = c(P, 1, Q), lambda = pu_lambda))
+}
+# create possible combinations except all zero & p = q = 4; P = Q = 1 (returns error)
+expand.grid(p = c(0, 1, 4), q = c(0, 1, 4), P = 0:1, Q = 0:1) %>%
+filter(p > 0 | q > 0 | P > 0 | Q > 0, p < 4 | q < 4 | P < 1 | Q < 1) %>%
+# calc AIC for models
+mutate(aic = pmap_dbl(list(p, q, P, Q), pu_aic)) %>% 
+# return best AIC
+slice(which.min(aic))
+```
+
+
+####The minimum AIC value returned is for the ARIMA(1,0,0)(0,1,1) model; this is used:
+
+```{r}
+pu_fit <- Arima(pu_data, order = c(1, 0, 0), seasonal = c(0, 1, 1), lambda = pu_lambda)
+```
+
+####Ljung-Box test and diagnostic plotting:
+
+```{r}
+Box.test(resid(pu_fit), type = "L", fitdf = 3, lag = 12)
+ggtsdisplay(resid(pu_fit), points = FALSE,
+main = "Residuals for ARIMA(1,0,0)(0,1,1) of residential power usage")
+```
+
+####From Ljung-Box test,  p-value > 0.05, but the spikes in ACF & PACF at $k = 3$ and $k = 4$ suggest the possibility of AR(3) or MA(3) components (since the spike at $k = 4$ was addressed above).  Investigation of these does not yield any AIC values lower than that of the above-identified model:
+
+```{r}
+expand.grid(p = c(1, 3), q = c(1, 3)) %>%
+mutate(aic = pmap_dbl(list(p, q, 0, 1), pu_aic))
+```
+
+####The residuals appears to be normally distributed around zero without any significant autocorrelation:
+
+```{r}
+ggtsdisplay(resid(pu_fit), points = FALSE, plot.type = "histogram",
+main = "Residuals for ARIMA(1,0,0)(0,1,1) of residential power usage")
+```
+
+#### Forecasting
+
+Using the ARIMA(1,0,0)(0,1,1) model, the next year (12 months) is forecast, and this forecast is plotted:
+
+```{r}
+pu_forecast <- forecast(pu_fit, 12, level = 95)
+autoplot(pu_forecast) + 
+labs(title = "Forecasted residential enery use",
+subtitle = "Using ARIMA(1,0,0)(0,1,1) model", x = "Month", y = "kWh") +
+theme(legend.position = "none")
+```
+
+#### The forecast shows annual seasonality. 
+
+```{r}
+data_frame(`YYYY-MMM` = paste0(2014, "-", month.abb),
+PU = pu_forecast$mean) %>% 
+write_csv("C:/Users/rites/Documents/GitHub/Data624-Project1/project1_kWh.csv")
+```
+
+##Part C - BONUS, optional (part or all), Waterflow_Pipe1.xlsx and Waterflow_Pipe2.xlsx
+
+####Part C consists of two data sets.  These are simple 2 columns sets, however they have different time stamps.  Your optional assignment is to time-base sequence the data and aggregate based on hour (example of what this looks like, follows).  Note for multiple recordings within an hour, take the mean.  Then to determine if the data is stationary and can it be forecast.  If so, provide a week forward forecast and present results via Rpubs and .rmd and the forecast in an Excel readable file. 
+
+```{r}
+# read the data
+water1 <- readxl::read_excel("C:/Users/rites/Documents/GitHub/Data624-Project1/Waterflow_Pipe1.xlsx")
+water2 <- readxl::read_excel("C:/Users/rites/Documents/GitHub/Data624-Project1/Waterflow_Pipe2.xlsx")
+```
+
+#### In order to use the two series together, the readings for pipeline 1 must be converted to hourly:
+
+```{r}
+water1 <- water1 %>% 
+# separate date & hour components of readings
+mutate(Date = date(DateTime),
+# convert hour to hour-ending to match pipeline 2
+Hour = hour(DateTime) + 1) %>% 
+# get average reading for each date & hour
+group_by(Date, Hour) %>% 
+summarize(WaterFlow = mean(WaterFlow)) %>% 
+# convert back to DateTime and drop separate date/hour columns
+ungroup() %>%
+mutate(DateTime = ymd_h(paste(Date, Hour))) %>% 
+select(DateTime, WaterFlow)
+```
+
+#### The two datasets are joined and a total wateflow is created, then converted to a timeseries:
+
+```{r}
+# create df with both observations for each hour
+water_df <- full_join(water1, water2, by = "DateTime", suffix = c("_1", "_2")) %>% 
+# convert missing pipeline 1 readings to zero
+mutate(WaterFlow_1 = ifelse(is.na(WaterFlow_1), 0, WaterFlow_1)) %>% 
+# get total waterflow by hour
+mutate(WaterFlow = WaterFlow_1 + WaterFlow_2) %>% 
+# drop individual numbers
+select(DateTime, WaterFlow)
+# create hourly timeseries object
+water_ts <- ts(water_df$WaterFlow, frequency = 24)
+```
+
+####The timeseries is plotted to inspect its features:
+
+```{r}
+autoplot(water_ts) +
+labs(title = "Hourly water flow through two pipelines", x = "Day", y = "Total waterflow")
+```
+
+####There is variability across the whole range, with an initial downward trend before day 10 followed by a roughly flat period through the end of the time window.
+
+#### Fitting
+
+####The variance is constant but we will perform .Due to the apparent non-stationarity, a lag-1 difference is taken:
+
+```{r c-trans}
+# Box-cox paramter & transform
+water_lambda <- BoxCox.lambda(water_ts)
+water_trans <- BoxCox(water_ts, water_lambda)
+# plot differenced transformed series
+ggtsdisplay(diff(water_trans), points = FALSE,
+main = "Differenced Box-Cox transformed water flow")
+```
+
+####The timeseries is stationary, but shows significant spikes in the ACF and PACF at $k = 1$, strongly suggesting non-seasonal AR(1) and MA(1) components.  There is no seasonal behavior.  Thus, an ARIMA(1,1,1) model is used:
+
+```{r}
+water_fit <- Arima(water_ts, order = c(1, 1, 1), lambda = water_lambda)
+```
+
+```{r}
+Box.test(resid(water_fit), type = "L")
+ggtsdisplay(resid(water_fit), points = FALSE, plot.type = "histogram",
+main = "Residuals for ARIMA(1,1,1) of water flow")
+```
+
+#### Ljung-Box test returns a value of almost 1; the residuals appear to be roughly normally distributed around 0 without significant autocorrelation.  The model is acceptable and will be used for forecasting.
+
+#### Forecasting
+
+####Using the ARIMA(1,1,1) model, one week (168 hours) is forecast, and the forecast plotted:
+
+```{r}
+water_forecast <- forecast(water_fit, 168, level = 95)
+autoplot(water_forecast) + 
+labs(title = "Forecasted water flow",
+x = "Day", y = "Total flow") +
+theme(legend.position = "none")
+```
+
+#### There is lack of seasonality so a single value is forecasted.  The forecast values are output to a .csv file:
+
+```{r}
+data_frame(DateTime = max(water_df$DateTime) + hours(1:168),
+WaterFlow = water_forecast$mean) %>% 
+write_csv("C:/Users/rites/Documents/GitHub/Data624-Project1/project1_water.csv")
+```
+
+
+
+
 
 
 
